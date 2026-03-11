@@ -6,6 +6,7 @@
   <title>Relatório Evangelístico</title>
 
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
 
   <style>
     :root{
@@ -183,7 +184,7 @@
 
     .file-pill{
       display:flex;
-      align-items:center;
+      align-items:flex-start;
       justify-content:space-between;
       gap:10px;
       border:1px solid rgba(255,255,255,.08);
@@ -355,6 +356,12 @@
       color:var(--muted);
       font-size:.9rem;
     }
+
+    .loading-note{
+      margin-top:10px;
+      color:var(--accent-2);
+      font-size:.9rem;
+    }
   </style>
 </head>
 <body>
@@ -379,6 +386,7 @@
           <input type="file" id="importJsonInput" accept=".json,application/json" hidden />
         </label>
       </div>
+      <div class="loading-note" id="loadingNote" style="display:none;"></div>
     </section>
 
     <div class="grid">
@@ -412,7 +420,7 @@
           <div class="file-box">
             <input type="file" id="entryFiles" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar" />
             <div class="hint">
-              Você pode anexar imagens, PDFs e outros arquivos. Para manter o app leve, evite arquivos muito pesados.
+              Imagens aparecem visualmente. PDFs são convertidos em imagens de todas as páginas para aparecerem no relatório. PDFs grandes podem deixar o app pesado.
             </div>
             <div class="files-preview" id="filesPreview"></div>
           </div>
@@ -425,7 +433,7 @@
         </div>
 
         <div class="footer-note">
-          Os dados ficam salvos no navegador deste dispositivo. Para segurança, exporte backup periodicamente.
+          Os dados ficam salvos no navegador deste dispositivo. Exporte backup com frequência. PDFs com muitas páginas ou imagens pesadas podem estourar o armazenamento local.
         </div>
       </section>
 
@@ -443,8 +451,12 @@
     </div>
   </div>
 
-  <script>
-    const STORAGE_KEY = "relatorio_evangelistico_v2";
+  <script type="module">
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs";
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
+
+    const STORAGE_KEY = "relatorio_evangelistico_v3_pdf_visual";
     let state = {
       entries: [],
       editingId: null,
@@ -468,6 +480,17 @@
     const exportJsonBtn = document.getElementById("exportJsonBtn");
     const importJsonInput = document.getElementById("importJsonInput");
     const newEntryBtn = document.getElementById("newEntryBtn");
+    const loadingNote = document.getElementById("loadingNote");
+
+    function setLoading(message = "") {
+      if (message) {
+        loadingNote.style.display = "block";
+        loadingNote.textContent = message;
+      } else {
+        loadingNote.style.display = "none";
+        loadingNote.textContent = "";
+      }
+    }
 
     function getLocalISODate(date = new Date()) {
       const tzOffset = date.getTimezoneOffset() * 60000;
@@ -550,6 +573,7 @@
       formTitle.textContent = "Novo registro diário";
       saveBtn.textContent = "Salvar registro";
       cancelEditBtn.style.display = "none";
+      setLoading("");
     }
 
     function renderPendingFiles() {
@@ -561,13 +585,16 @@
         const div = document.createElement("div");
         div.className = "file-pill";
 
-        const isImage = file.type && file.type.startsWith("image/");
+        const isRenderableImage = file.type && file.type.startsWith("image/");
+        const sourceInfo = file.sourceType === "application/pdf"
+          ? ` • originado de PDF (${escapeHtml(file.originalName || file.name)})`
+          : "";
 
         div.innerHTML = `
           <div style="flex:1;min-width:0;">
             <strong style="display:block;word-break:break-word;">${escapeHtml(file.name)}</strong>
-            <small>${escapeHtml(file.type || "arquivo")} • ${formatBytes(file.size || 0)}</small>
-            ${isImage ? `<img class="thumb" src="${file.data}" alt="${escapeHtml(file.name)}">` : ""}
+            <small>${escapeHtml(file.type || "arquivo")} • ${formatBytes(file.size || 0)}${sourceInfo}</small>
+            ${isRenderableImage ? `<img class="thumb" src="${file.data}" alt="${escapeHtml(file.name)}">` : ""}
           </div>
           <button class="btn-danger small-btn" data-remove-pending="${index}">Remover</button>
         `;
@@ -590,6 +617,11 @@
       return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     }
 
+    function dataUrlSizeInBytes(dataUrl = "") {
+      const base64 = dataUrl.split(",")[1] || "";
+      return Math.ceil((base64.length * 3) / 4);
+    }
+
     function escapeHtml(str = "") {
       return str
         .replaceAll("&", "&amp;")
@@ -597,31 +629,6 @@
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
-    }
-
-    async function filesToDataArray(fileList) {
-      const files = Array.from(fileList || []);
-      const results = [];
-
-      for (const file of files) {
-        let data;
-
-        if (file.type && file.type.startsWith("image/")) {
-          data = await normalizeImage(file);
-        } else {
-          data = await readFileAsDataURL(file);
-        }
-
-        results.push({
-          id: crypto.randomUUID(),
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size || 0,
-          data
-        });
-      }
-
-      return results;
     }
 
     function readFileAsDataURL(file) {
@@ -667,7 +674,6 @@
 
         if (marker === 0xFFE1) {
           if (offset + 2 > length) return 1;
-          const app1Length = view.getUint16(offset, false);
           const exifStart = offset + 2;
 
           if (exifStart + 6 > length) return 1;
@@ -764,7 +770,6 @@
         }
 
         ctx.drawImage(img, 0, 0, width, height);
-
         return canvas.toDataURL("image/jpeg", 0.92);
       } catch (error) {
         console.warn("Falha ao normalizar imagem, usando original:", error);
@@ -772,11 +777,99 @@
       }
     }
 
+    async function convertPdfToImages(file) {
+      const arrayBuffer = await readFileAsArrayBuffer(file);
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pages = [];
+
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+        setLoading(`Convertendo PDF: página ${pageNumber} de ${pdf.numPages}...`);
+
+        const page = await pdf.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.6 });
+
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        if (!context) continue;
+
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({
+          canvasContext: context,
+          viewport
+        }).promise;
+
+        const data = canvas.toDataURL("image/jpeg", 0.9);
+
+        pages.push({
+          id: crypto.randomUUID(),
+          name: `${file.name} - página ${pageNumber}`,
+          originalName: file.name,
+          type: "image/jpeg",
+          sourceType: "application/pdf",
+          pageNumber,
+          size: dataUrlSizeInBytes(data),
+          data
+        });
+      }
+
+      return pages;
+    }
+
+    async function filesToDataArray(fileList) {
+      const files = Array.from(fileList || []);
+      const results = [];
+
+      for (const file of files) {
+        if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+          const pdfPages = await convertPdfToImages(file);
+          results.push(...pdfPages);
+          continue;
+        }
+
+        if (file.type && file.type.startsWith("image/")) {
+          const normalized = await normalizeImage(file);
+          results.push({
+            id: crypto.randomUUID(),
+            name: file.name,
+            originalName: file.name,
+            type: "image/jpeg",
+            sourceType: file.type,
+            size: dataUrlSizeInBytes(normalized),
+            data: normalized
+          });
+          continue;
+        }
+
+        const data = await readFileAsDataURL(file);
+        results.push({
+          id: crypto.randomUUID(),
+          name: file.name,
+          originalName: file.name,
+          type: file.type || "application/octet-stream",
+          sourceType: file.type || "application/octet-stream",
+          size: file.size || 0,
+          data
+        });
+      }
+
+      return results;
+    }
+
     async function handleFileInputChange(e) {
-      const files = await filesToDataArray(e.target.files);
-      state.pendingFiles.push(...files);
-      renderPendingFiles();
-      entryFiles.value = "";
+      try {
+        setLoading("Processando anexos...");
+        const files = await filesToDataArray(e.target.files);
+        state.pendingFiles.push(...files);
+        renderPendingFiles();
+      } catch (error) {
+        console.error(error);
+        alert("Falha ao processar os anexos.");
+      } finally {
+        entryFiles.value = "";
+        setLoading("");
+      }
     }
 
     function upsertEntry() {
@@ -929,161 +1022,180 @@
         return;
       }
 
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF("p", "mm", "a4");
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const margin = 16;
-      let y = 20;
+      try {
+        setLoading("Gerando PDF semanal...");
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF("p", "mm", "a4");
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const margin = 16;
+        let y = 20;
 
-      const weekText = weekRangeLabel(new Date());
-      const generatedAt = new Date().toLocaleString("pt-BR");
+        const weekText = weekRangeLabel(new Date());
+        const generatedAt = new Date().toLocaleString("pt-BR");
 
-      doc.setFillColor(18, 22, 30);
-      doc.rect(0, 0, pageWidth, pageHeight, "F");
+        doc.setFillColor(18, 22, 30);
+        doc.rect(0, 0, pageWidth, pageHeight, "F");
 
-      doc.setTextColor(240, 217, 120);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(22);
-      doc.text("Relatório Semanal - Henrique Castro", margin, 38);
-
-      doc.setTextColor(255, 255, 255);
-      doc.setFontSize(13);
-      doc.setFont("helvetica", "normal");
-      doc.text("Registro evangelístico - Distrito de Restinga", margin, 48);
-
-      doc.setDrawColor(212, 175, 55);
-      doc.setLineWidth(0.8);
-      doc.line(margin, 56, pageWidth - margin, 56);
-
-      doc.setFontSize(11);
-      doc.setTextColor(210, 216, 226);
-      doc.text(`Período: ${weekText}`, margin, 72);
-      doc.text(`Registros na semana: ${weeklyEntries.length}`, margin, 80);
-      doc.text(`Gerado em: ${generatedAt}`, margin, 88);
-
-      doc.setTextColor(170, 179, 194);
-      doc.setFontSize(10);
-      const intro = doc.splitTextToSize(
-        "Documento consolidado com os registros diários da semana, incluindo texto livre e relação de anexos. Imagens são incluídas visualmente quando disponíveis.",
-        pageWidth - margin * 2
-      );
-      doc.text(intro, margin, 102);
-
-      for (let i = 0; i < weeklyEntries.length; i++) {
-        const entry = weeklyEntries[i];
-        doc.addPage();
-        y = 18;
-
-        doc.setFillColor(245, 245, 245);
-        doc.roundedRect(margin, y, pageWidth - margin * 2, 16, 4, 4, "F");
-
-        doc.setTextColor(40, 40, 40);
+        doc.setTextColor(240, 217, 120);
         doc.setFont("helvetica", "bold");
-        doc.setFontSize(14);
-        doc.text(capitalize(formatDateLong(entry.date)), margin + 6, y + 10);
+        doc.setFontSize(22);
+        doc.text("Relatório Semanal - Henrique Castro", margin, 38);
 
-        y += 24;
-
-        if (entry.reference) {
-          doc.setTextColor(110, 110, 110);
-          doc.setFont("helvetica", "italic");
-          doc.setFontSize(10.5);
-          const refLines = doc.splitTextToSize(entry.reference, pageWidth - margin * 2);
-          doc.text(refLines, margin, y);
-          y += refLines.length * 5 + 3;
-        }
-
-        doc.setTextColor(35, 35, 35);
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(13);
         doc.setFont("helvetica", "normal");
+        doc.text("Registro evangelístico - Distrito de Restinga", margin, 48);
+
+        doc.setDrawColor(212, 175, 55);
+        doc.setLineWidth(0.8);
+        doc.line(margin, 56, pageWidth - margin, 56);
+
         doc.setFontSize(11);
-        const bodyLines = doc.splitTextToSize(entry.text, pageWidth - margin * 2);
-        const blockHeight = bodyLines.length * 5.5;
+        doc.setTextColor(210, 216, 226);
+        doc.text(`Período: ${weekText}`, margin, 72);
+        doc.text(`Registros na semana: ${weeklyEntries.length}`, margin, 80);
+        doc.text(`Gerado em: ${generatedAt}`, margin, 88);
 
-        if (y + blockHeight > pageHeight - 25) {
+        doc.setTextColor(170, 179, 194);
+        doc.setFontSize(10);
+        const intro = doc.splitTextToSize(
+          "Documento consolidado com os registros diários da semana. Imagens anexadas e páginas de PDF convertidas aparecem visualmente abaixo de cada relatório.",
+          pageWidth - margin * 2
+        );
+        doc.text(intro, margin, 102);
+
+        for (let i = 0; i < weeklyEntries.length; i++) {
+          const entry = weeklyEntries[i];
           doc.addPage();
-          y = 20;
-        }
+          y = 18;
 
-        doc.text(bodyLines, margin, y);
-        y += blockHeight + 8;
+          doc.setFillColor(245, 245, 245);
+          doc.roundedRect(margin, y, pageWidth - margin * 2, 16, 4, 4, "F");
 
-        const imageFiles = (entry.files || []).filter(f => f.type && f.type.startsWith("image/"));
-        const otherFiles = (entry.files || []).filter(f => !(f.type && f.type.startsWith("image/")));
+          doc.setTextColor(40, 40, 40);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(14);
+          doc.text(capitalize(formatDateLong(entry.date)), margin + 6, y + 10);
 
-        if (otherFiles.length) {
-          if (y > pageHeight - 35) {
+          y += 24;
+
+          if (entry.reference) {
+            doc.setTextColor(110, 110, 110);
+            doc.setFont("helvetica", "italic");
+            doc.setFontSize(10.5);
+            const refLines = doc.splitTextToSize(entry.reference, pageWidth - margin * 2);
+            doc.text(refLines, margin, y);
+            y += refLines.length * 5 + 3;
+          }
+
+          doc.setTextColor(35, 35, 35);
+          doc.setFont("helvetica", "normal");
+          doc.setFontSize(11);
+          const bodyLines = doc.splitTextToSize(entry.text, pageWidth - margin * 2);
+          const blockHeight = bodyLines.length * 5.5;
+
+          if (y + blockHeight > pageHeight - 25) {
             doc.addPage();
             y = 20;
           }
 
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(11);
-          doc.setTextColor(55, 55, 55);
-          doc.text("Anexos listados:", margin, y);
-          y += 7;
+          doc.text(bodyLines, margin, y);
+          y += blockHeight + 8;
 
-          doc.setFont("helvetica", "normal");
-          doc.setFontSize(10.5);
-          otherFiles.forEach(file => {
-            const line = `• ${file.name} (${file.type || "arquivo"})`;
-            const split = doc.splitTextToSize(line, pageWidth - margin * 2);
-            if (y + split.length * 5 > pageHeight - 20) {
+          const imageFiles = (entry.files || []).filter(f => f.type && f.type.startsWith("image/"));
+          const otherFiles = (entry.files || []).filter(f => !(f.type && f.type.startsWith("image/")));
+
+          if (otherFiles.length) {
+            if (y > pageHeight - 35) {
               doc.addPage();
               y = 20;
             }
-            doc.text(split, margin + 2, y);
-            y += split.length * 5 + 1.5;
-          });
 
-          y += 4;
-        }
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(11);
+            doc.setTextColor(55, 55, 55);
+            doc.text("Anexos não visuais listados:", margin, y);
+            y += 7;
 
-        if (imageFiles.length) {
-          if (y > pageHeight - 45) {
-            doc.addPage();
-            y = 20;
-          }
-
-          doc.setFont("helvetica", "bold");
-          doc.setFontSize(11);
-          doc.setTextColor(55, 55, 55);
-          doc.text("Imagens anexadas:", margin, y);
-          y += 7;
-
-          for (const img of imageFiles) {
-            try {
-              const props = doc.getImageProperties(img.data);
-              const maxW = pageWidth - margin * 2;
-              const maxH = 90;
-              let w = props.width;
-              let h = props.height;
-
-              const ratio = Math.min(maxW / w, maxH / h);
-              w *= ratio;
-              h *= ratio;
-
-              if (y + h > pageHeight - 15) {
+            doc.setFont("helvetica", "normal");
+            doc.setFontSize(10.5);
+            otherFiles.forEach(file => {
+              const line = `• ${file.name} (${file.type || "arquivo"})`;
+              const split = doc.splitTextToSize(line, pageWidth - margin * 2);
+              if (y + split.length * 5 > pageHeight - 20) {
                 doc.addPage();
                 y = 20;
               }
+              doc.text(split, margin + 2, y);
+              y += split.length * 5 + 1.5;
+            });
 
-              doc.addImage(img.data, "JPEG", margin, y, w, h);
-              y += h + 6;
-            } catch (error) {
-              console.warn("Falha ao inserir imagem no PDF:", img.name, error);
+            y += 4;
+          }
+
+          if (imageFiles.length) {
+            if (y > pageHeight - 45) {
+              doc.addPage();
+              y = 20;
+            }
+
+            doc.setFont("helvetica", "bold");
+            doc.setFontSize(11);
+            doc.setTextColor(55, 55, 55);
+            doc.text("Anexos visuais:", margin, y);
+            y += 7;
+
+            for (const img of imageFiles) {
+              try {
+                const props = doc.getImageProperties(img.data);
+                const maxW = pageWidth - margin * 2;
+                const maxH = 90;
+                let w = props.width;
+                let h = props.height;
+
+                const ratio = Math.min(maxW / w, maxH / h);
+                w *= ratio;
+                h *= ratio;
+
+                if (y + h > pageHeight - 15) {
+                  doc.addPage();
+                  y = 20;
+                }
+
+                doc.addImage(img.data, "JPEG", margin, y, w, h);
+                y += h + 3;
+
+                doc.setFont("helvetica", "italic");
+                doc.setFontSize(8.5);
+                doc.setTextColor(100, 100, 100);
+                const caption = img.sourceType === "application/pdf"
+                  ? `${img.originalName || img.name} - página ${img.pageNumber || ""}`.trim()
+                  : img.name;
+
+                const captionLines = doc.splitTextToSize(caption, pageWidth - margin * 2);
+                doc.text(captionLines, margin, y + 3);
+                y += captionLines.length * 4 + 4;
+              } catch (error) {
+                console.warn("Falha ao inserir imagem no PDF:", img.name, error);
+              }
             }
           }
+
+          doc.setFont("helvetica", "italic");
+          doc.setFontSize(9);
+          doc.setTextColor(130, 130, 130);
+          doc.text(`Página ${doc.getNumberOfPages()}`, pageWidth - 28, pageHeight - 10);
         }
 
-        doc.setFont("helvetica", "italic");
-        doc.setFontSize(9);
-        doc.setTextColor(130, 130, 130);
-        doc.text(`Página ${doc.getNumberOfPages()}`, pageWidth - 28, pageHeight - 10);
+        const filename = `relatorio-semanal-${getLocalISODate()}.pdf`;
+        doc.save(filename);
+      } catch (error) {
+        console.error(error);
+        alert("Falha ao gerar o PDF semanal.");
+      } finally {
+        setLoading("");
       }
-
-      const filename = `relatorio-semanal-${getLocalISODate()}.pdf`;
-      doc.save(filename);
     }
 
     function exportBackup() {
