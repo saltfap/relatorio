@@ -602,31 +602,156 @@
     }
 
     async function filesToDataArray(fileList) {
-      const files = Array.from(fileList || []);
-      const results = [];
+    const files = Array.from(fileList || []);
+    const results = [];
 
-      for (const file of files) {
-        const data = await readFileAsDataURL(file);
-        results.push({
-          id: crypto.randomUUID(),
-          name: file.name,
-          type: file.type || "application/octet-stream",
-          size: file.size || 0,
-          data
-        });
+    for (const file of files) {
+      let data;
+
+      if (file.type && file.type.startsWith("image/")) {
+        data = await normalizeImage(file);
+      } else {
+        data = await readFileAsDataURL(file);
       }
 
-      return results;
-    }
-
-    function readFileAsDataURL(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
+      results.push({
+        id: crypto.randomUUID(),
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size || 0,
+        data
       });
     }
+
+    return results;
+  }
+
+  function readFileAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function readFileAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  async function normalizeImage(file) {
+    const arrayBuffer = await readFileAsArrayBuffer(file);
+    const orientation = getExifOrientation(arrayBuffer);
+
+    const originalDataUrl = await readFileAsDataURL(file);
+    const img = await loadImage(originalDataUrl);
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    let width = img.width;
+    let height = img.height;
+
+    // Orientações que trocam largura/altura
+    if ([5, 6, 7, 8].includes(orientation)) {
+      canvas.width = height;
+      canvas.height = width;
+    } else {
+      canvas.width = width;
+      canvas.height = height;
+    }
+
+    switch (orientation) {
+      case 2:
+        ctx.transform(-1, 0, 0, 1, width, 0);
+        break;
+      case 3:
+        ctx.transform(-1, 0, 0, -1, width, height);
+        break;
+      case 4:
+        ctx.transform(1, 0, 0, -1, 0, height);
+        break;
+      case 5:
+        ctx.transform(0, 1, 1, 0, 0, 0);
+        break;
+      case 6:
+        ctx.transform(0, 1, -1, 0, height, 0);
+        break;
+      case 7:
+        ctx.transform(0, -1, -1, 0, height, width);
+        break;
+      case 8:
+        ctx.transform(0, -1, 1, 0, 0, width);
+        break;
+      default:
+        ctx.transform(1, 0, 0, 1, 0, 0);
+    }
+
+    ctx.drawImage(img, 0, 0);
+
+    // Converte já corrigida
+    return canvas.toDataURL("image/jpeg", 0.92);
+  }
+
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  function getExifOrientation(arrayBuffer) {
+    const view = new DataView(arrayBuffer);
+
+    if (view.getUint16(0, false) !== 0xFFD8) return 1;
+
+    let offset = 2;
+    const length = view.byteLength;
+
+    while (offset < length) {
+      const marker = view.getUint16(offset, false);
+      offset += 2;
+
+      if (marker === 0xFFE1) {
+        const exifLength = view.getUint16(offset, false);
+        offset += 2;
+
+        if (view.getUint32(offset, false) !== 0x45786966) return 1; // "Exif"
+        offset += 6;
+
+        const little = view.getUint16(offset, false) === 0x4949;
+        const firstIFDOffset = view.getUint32(offset + 4, little);
+
+        if (firstIFDOffset < 0x00000008) return 1;
+
+        let dirStart = offset + firstIFDOffset;
+        const entries = view.getUint16(dirStart, little);
+        dirStart += 2;
+
+        for (let i = 0; i < entries; i++) {
+          const entryOffset = dirStart + i * 12;
+          const tag = view.getUint16(entryOffset, little);
+
+          if (tag === 0x0112) {
+            return view.getUint16(entryOffset + 8, little);
+          }
+        }
+      } else if ((marker & 0xFF00) !== 0xFF00) {
+        break;
+      } else {
+        offset += view.getUint16(offset, false);
+      }
+    }
+
+    return 1;
+  }
 
     async function handleFileInputChange(e) {
       const files = await filesToDataArray(e.target.files);
@@ -803,12 +928,12 @@
       doc.setTextColor(240, 217, 120);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(22);
-      doc.text("Relatório Semanal", margin, 38);
+      doc.text("Relatório Semanal - Henrique Castro", margin, 38);
 
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(13);
       doc.setFont("helvetica", "normal");
-      doc.text("Registros evangelísticos organizados", margin, 48);
+      doc.text("Registro evangelístico - Distrito de Restinga", margin, 48);
 
       doc.setDrawColor(212, 175, 55);
       doc.setLineWidth(0.8);
