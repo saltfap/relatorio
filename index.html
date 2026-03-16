@@ -549,20 +549,19 @@
     }
 
     function getWeekStart(date = new Date()) {
-      const d = new Date(date);
-      const day = d.getDay();
-      const diff = day === 0 ? -6 : 1 - day;
-      d.setDate(d.getDate() + diff);
-      d.setHours(0,0,0,0);
-      return d;
-    }
+  const d = new Date(date);
+  const day = d.getDay(); // 0 = domingo, 6 = sábado
+  d.setDate(d.getDate() - day);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
 
-    function getWeekEndFromStart(weekStartDate) {
-      const end = new Date(weekStartDate);
-      end.setDate(end.getDate() + 6);
-      end.setHours(23,59,59,999);
-      return end;
-    }
+function getWeekEndFromStart(weekStartDate) {
+  const end = new Date(weekStartDate);
+  end.setDate(end.getDate() + 6); // sábado
+  end.setHours(23, 59, 59, 999);
+  return end;
+}
 
     function getWeekEnd(date = new Date()) {
       return getWeekEndFromStart(getWeekStart(date));
