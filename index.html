@@ -6,7 +6,6 @@
   <title>Relatório Evangelístico</title>
 
   <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.min.mjs" type="module"></script>
 
   <style>
     :root{
@@ -22,7 +21,6 @@
       --danger:#ff6b6b;
       --ok:#5fd38d;
       --shadow:0 18px 40px rgba(0,0,0,.28);
-      --radius:18px;
     }
 
     *{box-sizing:border-box}
@@ -108,9 +106,7 @@
       letter-spacing:.2px;
     }
 
-    .muted{
-      color:var(--muted);
-    }
+    .muted{ color:var(--muted); }
 
     .row{
       display:grid;
@@ -265,6 +261,19 @@
       border-radius:16px;
     }
 
+    .week-nav{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    .week-nav button{
+      padding:10px 12px;
+      border-radius:12px;
+      font-size:.9rem;
+    }
+
     .entries{
       display:grid;
       gap:14px;
@@ -362,6 +371,13 @@
       color:var(--accent-2);
       font-size:.9rem;
     }
+
+    .warning-note{
+      margin-top:10px;
+      color:#ffd6a5;
+      font-size:.85rem;
+      line-height:1.45;
+    }
   </style>
 </head>
 <body>
@@ -379,7 +395,7 @@
 
       <div class="top-tools">
         <button class="btn-dark" id="newEntryBtn">Novo registro</button>
-        <button class="btn-ok" id="generatePdfBtn">Gerar PDF da semana</button>
+        <button class="btn-ok" id="generatePdfBtn">Gerar PDF da semana selecionada</button>
         <button class="btn-dark" id="exportJsonBtn">Exportar backup</button>
         <label class="btn-dark" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
           Importar backup
@@ -387,6 +403,9 @@
         </label>
       </div>
       <div class="loading-note" id="loadingNote" style="display:none;"></div>
+      <div class="warning-note">
+        PDFs agora são convertidos em imagens e salvos em IndexedDB, não em localStorage. Isso corrige a perda de anexos pesados, mas PDFs muito grandes ainda podem deixar o app lento.
+      </div>
     </section>
 
     <div class="grid">
@@ -397,13 +416,13 @@
           <div>
             <label for="entryDate">Data do registro</label>
             <input type="date" id="entryDate" />
-            <div class="hint">A data é vinculada ao relógio/local do dispositivo e vem preenchida automaticamente.</div>
+            <div class="hint">A data usa o relógio do dispositivo e vem preenchida automaticamente.</div>
           </div>
 
           <div>
             <label for="entryReference">Referência curta (opcional)</label>
             <input type="text" id="entryReference" placeholder="Ex.: Evangelismo bairro X, visita, culto, estudo..." />
-            <div class="hint">Esse campo é opcional. Serve apenas como apoio visual no histórico e no PDF.</div>
+            <div class="hint">Apoio visual no histórico e no PDF.</div>
           </div>
         </div>
 
@@ -420,7 +439,7 @@
           <div class="file-box">
             <input type="file" id="entryFiles" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar" />
             <div class="hint">
-              Imagens aparecem visualmente. PDFs são convertidos em imagens de todas as páginas para aparecerem no relatório. PDFs grandes podem deixar o app pesado.
+              Imagens aparecem visualmente. PDFs são convertidos em imagens de todas as páginas e permanecem salvos.
             </div>
             <div class="files-preview" id="filesPreview"></div>
           </div>
@@ -433,16 +452,23 @@
         </div>
 
         <div class="footer-note">
-          Os dados ficam salvos no navegador deste dispositivo. Exporte backup com frequência. PDFs com muitas páginas ou imagens pesadas podem estourar o armazenamento local.
+          Backup continua importante. IndexedDB é melhor que localStorage para anexos pesados, mas não é infinito.
         </div>
       </section>
 
       <section class="card">
         <div class="week-box">
           <div>
-            <h2 style="margin:0 0 6px;">Semana atual</h2>
+            <h2 style="margin:0 0 6px;">Semanas</h2>
             <div class="muted" id="weekRange">Carregando...</div>
           </div>
+
+          <div class="week-nav">
+            <button class="btn-dark" id="prevWeekBtn">← Semana anterior</button>
+            <button class="btn-dark" id="currentWeekBtn">Semana atual</button>
+            <button class="btn-dark" id="nextWeekBtn">Próxima semana →</button>
+          </div>
+
           <div class="counter" id="weekCounter">0 registros</div>
         </div>
 
@@ -456,11 +482,18 @@
 
     pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/pdf.worker.min.mjs";
 
-    const STORAGE_KEY = "relatorio_evangelistico_v3_pdf_visual";
+    const DB_NAME = "relatorio_evangelistico_db";
+    const DB_VERSION = 1;
+    const STORE_NAME = "app_state";
+    const STATE_KEY = "main_state";
+
+    let db = null;
+
     let state = {
       entries: [],
       editingId: null,
-      pendingFiles: []
+      pendingFiles: [],
+      selectedWeekStart: null
     };
 
     const entryDate = document.getElementById("entryDate");
@@ -481,6 +514,9 @@
     const importJsonInput = document.getElementById("importJsonInput");
     const newEntryBtn = document.getElementById("newEntryBtn");
     const loadingNote = document.getElementById("loadingNote");
+    const prevWeekBtn = document.getElementById("prevWeekBtn");
+    const currentWeekBtn = document.getElementById("currentWeekBtn");
+    const nextWeekBtn = document.getElementById("nextWeekBtn");
 
     function setLoading(message = "") {
       if (message) {
@@ -521,94 +557,39 @@
       return d;
     }
 
-    function getWeekEnd(date = new Date()) {
-      const start = getWeekStart(date);
-      const end = new Date(start);
-      end.setDate(start.getDate() + 6);
+    function getWeekEndFromStart(weekStartDate) {
+      const end = new Date(weekStartDate);
+      end.setDate(end.getDate() + 6);
       end.setHours(23,59,59,999);
       return end;
     }
 
-    function weekRangeLabel(date = new Date()) {
-      const start = getWeekStart(date);
-      const end = getWeekEnd(date);
-      const startISO = getLocalISODate(start);
-      const endISO = getLocalISODate(end);
+    function getWeekEnd(date = new Date()) {
+      return getWeekEndFromStart(getWeekStart(date));
+    }
+
+    function weekRangeLabelFromStart(weekStartDate) {
+      const startISO = getLocalISODate(weekStartDate);
+      const endISO = getLocalISODate(getWeekEndFromStart(weekStartDate));
       return `${formatDateBR(startISO)} até ${formatDateBR(endISO)}`;
     }
 
-    function isDateInCurrentWeek(isoDate) {
+    function getSelectedWeekStartDate() {
+      if (!state.selectedWeekStart) {
+        state.selectedWeekStart = getLocalISODate(getWeekStart(new Date()));
+      }
+      return new Date(state.selectedWeekStart + "T00:00:00");
+    }
+
+    function isDateInSelectedWeek(isoDate) {
       const target = new Date(isoDate + "T12:00:00");
-      const start = getWeekStart(new Date());
-      const end = getWeekEnd(new Date());
+      const start = getSelectedWeekStartDate();
+      const end = getWeekEndFromStart(start);
       return target >= start && target <= end;
     }
 
-    function loadState() {
-      try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed.entries)) {
-            state.entries = parsed.entries;
-          }
-        }
-      } catch (error) {
-        console.error("Erro ao carregar dados:", error);
-      }
-    }
-
-    function saveState() {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries: state.entries }));
-    }
-
-    function resetForm() {
-      state.editingId = null;
-      state.pendingFiles = [];
-      entryDate.value = getLocalISODate();
-      entryReference.value = "";
-      entryText.value = "";
-      entryFiles.value = "";
-      filesPreview.innerHTML = "";
-      formTitle.textContent = "Novo registro diário";
-      saveBtn.textContent = "Salvar registro";
-      cancelEditBtn.style.display = "none";
-      setLoading("");
-    }
-
-    function renderPendingFiles() {
-      filesPreview.innerHTML = "";
-
-      if (!state.pendingFiles.length) return;
-
-      state.pendingFiles.forEach((file, index) => {
-        const div = document.createElement("div");
-        div.className = "file-pill";
-
-        const isRenderableImage = file.type && file.type.startsWith("image/");
-        const sourceInfo = file.sourceType === "application/pdf"
-          ? ` • originado de PDF (${escapeHtml(file.originalName || file.name)})`
-          : "";
-
-        div.innerHTML = `
-          <div style="flex:1;min-width:0;">
-            <strong style="display:block;word-break:break-word;">${escapeHtml(file.name)}</strong>
-            <small>${escapeHtml(file.type || "arquivo")} • ${formatBytes(file.size || 0)}${sourceInfo}</small>
-            ${isRenderableImage ? `<img class="thumb" src="${file.data}" alt="${escapeHtml(file.name)}">` : ""}
-          </div>
-          <button class="btn-danger small-btn" data-remove-pending="${index}">Remover</button>
-        `;
-
-        filesPreview.appendChild(div);
-      });
-
-      document.querySelectorAll("[data-remove-pending]").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const index = Number(btn.getAttribute("data-remove-pending"));
-          state.pendingFiles.splice(index, 1);
-          renderPendingFiles();
-        });
-      });
+    function capitalize(str) {
+      return str.charAt(0).toUpperCase() + str.slice(1);
     }
 
     function formatBytes(bytes) {
@@ -699,8 +680,6 @@
               return view.getUint16(entryOffset + 8, little);
             }
           }
-
-          return 1;
         } else if ((marker & 0xFF00) !== 0xFF00) {
           break;
         } else {
@@ -770,7 +749,7 @@
         }
 
         ctx.drawImage(img, 0, 0, width, height);
-        return canvas.toDataURL("image/jpeg", 0.92);
+        return canvas.toDataURL("image/jpeg", 0.82);
       } catch (error) {
         console.warn("Falha ao normalizar imagem, usando original:", error);
         return originalDataUrl;
@@ -786,7 +765,7 @@
         setLoading(`Convertendo PDF: página ${pageNumber} de ${pdf.numPages}...`);
 
         const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 1.6 });
+        const viewport = page.getViewport({ scale: 1.15 });
 
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d");
@@ -800,7 +779,7 @@
           viewport
         }).promise;
 
-        const data = canvas.toDataURL("image/jpeg", 0.9);
+        const data = canvas.toDataURL("image/jpeg", 0.72);
 
         pages.push({
           id: crypto.randomUUID(),
@@ -857,6 +836,106 @@
       return results;
     }
 
+    function openDatabase() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+          const database = event.target.result;
+          if (!database.objectStoreNames.contains(STORE_NAME)) {
+            database.createObjectStore(STORE_NAME);
+          }
+        };
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function idbGet(key) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.get(key);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    function idbSet(key, value) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const request = store.put(value, key);
+        request.onsuccess = () => resolve(true);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function loadState() {
+      try {
+        const saved = await idbGet(STATE_KEY);
+        if (saved && Array.isArray(saved.entries)) {
+          state.entries = saved.entries;
+        }
+      } catch (error) {
+        console.error("Erro ao carregar IndexedDB:", error);
+      }
+    }
+
+    async function saveState() {
+      await idbSet(STATE_KEY, { entries: state.entries });
+    }
+
+    function resetForm() {
+      state.editingId = null;
+      state.pendingFiles = [];
+      entryDate.value = getLocalISODate();
+      entryReference.value = "";
+      entryText.value = "";
+      entryFiles.value = "";
+      filesPreview.innerHTML = "";
+      formTitle.textContent = "Novo registro diário";
+      saveBtn.textContent = "Salvar registro";
+      cancelEditBtn.style.display = "none";
+      setLoading("");
+    }
+
+    function renderPendingFiles() {
+      filesPreview.innerHTML = "";
+
+      if (!state.pendingFiles.length) return;
+
+      state.pendingFiles.forEach((file, index) => {
+        const div = document.createElement("div");
+        div.className = "file-pill";
+
+        const isRenderableImage = file.type && file.type.startsWith("image/");
+        const sourceInfo = file.sourceType === "application/pdf"
+          ? ` • originado de PDF (${escapeHtml(file.originalName || file.name)})`
+          : "";
+
+        div.innerHTML = `
+          <div style="flex:1;min-width:0;">
+            <strong style="display:block;word-break:break-word;">${escapeHtml(file.name)}</strong>
+            <small>${escapeHtml(file.type || "arquivo")} • ${formatBytes(file.size || 0)}${sourceInfo}</small>
+            ${isRenderableImage ? `<img class="thumb" src="${file.data}" alt="${escapeHtml(file.name)}">` : ""}
+          </div>
+          <button class="btn-danger small-btn" data-remove-pending="${index}">Remover</button>
+        `;
+
+        filesPreview.appendChild(div);
+      });
+
+      document.querySelectorAll("[data-remove-pending]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const index = Number(btn.getAttribute("data-remove-pending"));
+          state.pendingFiles.splice(index, 1);
+          renderPendingFiles();
+        });
+      });
+    }
+
     async function handleFileInputChange(e) {
       try {
         setLoading("Processando anexos...");
@@ -872,7 +951,7 @@
       }
     }
 
-    function upsertEntry() {
+    async function upsertEntry() {
       const date = entryDate.value || getLocalISODate();
       const reference = entryReference.value.trim();
       const text = entryText.value.trim();
@@ -891,35 +970,49 @@
         updatedAt: new Date().toISOString()
       };
 
-      if (state.editingId) {
-        const idx = state.entries.findIndex(e => e.id === state.editingId);
-        if (idx !== -1) state.entries[idx] = payload;
-      } else {
-        state.entries.push(payload);
-      }
+      try {
+        setLoading("Salvando registro...");
 
-      state.entries.sort((a,b) => a.date.localeCompare(b.date));
-      saveState();
-      resetForm();
-      renderAll();
+        if (state.editingId) {
+          const idx = state.entries.findIndex(e => e.id === state.editingId);
+          if (idx !== -1) state.entries[idx] = payload;
+        } else {
+          state.entries.push(payload);
+        }
+
+        state.entries.sort((a,b) => a.date.localeCompare(b.date));
+        await saveState();
+        resetForm();
+        renderAll();
+      } catch (error) {
+        console.error(error);
+        alert("Falha ao salvar. Provavelmente os anexos ficaram grandes demais para o armazenamento disponível.");
+      } finally {
+        setLoading("");
+      }
+    }
+
+    function getEntriesForSelectedWeek() {
+      return [...state.entries]
+        .filter(entry => isDateInSelectedWeek(entry.date))
+        .sort((a,b) => a.date.localeCompare(b.date));
     }
 
     function renderEntries() {
-      const currentWeekEntries = [...state.entries]
-        .filter(entry => isDateInCurrentWeek(entry.date))
-        .sort((a,b) => a.date.localeCompare(b.date));
+      const selectedWeekEntries = getEntriesForSelectedWeek();
+      const selectedWeekStartDate = getSelectedWeekStartDate();
 
-      weekRange.textContent = weekRangeLabel(new Date());
-      weekCounter.textContent = `${currentWeekEntries.length} ${currentWeekEntries.length === 1 ? "registro" : "registros"}`;
+      weekRange.textContent = weekRangeLabelFromStart(selectedWeekStartDate);
+      weekCounter.textContent = `${selectedWeekEntries.length} ${selectedWeekEntries.length === 1 ? "registro" : "registros"}`;
 
       entriesList.innerHTML = "";
 
-      if (!currentWeekEntries.length) {
+      if (!selectedWeekEntries.length) {
         entriesList.innerHTML = `<div class="empty">Nenhum registro salvo nesta semana.</div>`;
         return;
       }
 
-      currentWeekEntries.forEach(entry => {
+      selectedWeekEntries.forEach(entry => {
         const div = document.createElement("div");
         div.className = "entry";
 
@@ -967,10 +1060,6 @@
       });
     }
 
-    function capitalize(str) {
-      return str.charAt(0).toUpperCase() + str.slice(1);
-    }
-
     function editEntry(id) {
       const entry = state.entries.find(e => e.id === id);
       if (!entry) return;
@@ -989,18 +1078,23 @@
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
 
-    function deleteEntry(id) {
+    async function deleteEntry(id) {
       const ok = confirm("Deseja realmente excluir este registro?");
       if (!ok) return;
 
-      state.entries = state.entries.filter(e => e.id !== id);
-      saveState();
+      try {
+        setLoading("Excluindo registro...");
+        state.entries = state.entries.filter(e => e.id !== id);
+        await saveState();
 
-      if (state.editingId === id) {
-        resetForm();
+        if (state.editingId === id) resetForm();
+        renderAll();
+      } catch (error) {
+        console.error(error);
+        alert("Falha ao excluir o registro.");
+      } finally {
+        setLoading("");
       }
-
-      renderAll();
     }
 
     function renderTodayBadge() {
@@ -1012,13 +1106,30 @@
       renderEntries();
     }
 
+    function goToPreviousWeek() {
+      const current = getSelectedWeekStartDate();
+      current.setDate(current.getDate() - 7);
+      state.selectedWeekStart = getLocalISODate(current);
+      renderAll();
+    }
+
+    function goToCurrentWeek() {
+      state.selectedWeekStart = getLocalISODate(getWeekStart(new Date()));
+      renderAll();
+    }
+
+    function goToNextWeek() {
+      const current = getSelectedWeekStartDate();
+      current.setDate(current.getDate() + 7);
+      state.selectedWeekStart = getLocalISODate(current);
+      renderAll();
+    }
+
     async function generateWeeklyPDF() {
-      const weeklyEntries = [...state.entries]
-        .filter(entry => isDateInCurrentWeek(entry.date))
-        .sort((a,b) => a.date.localeCompare(b.date));
+      const weeklyEntries = getEntriesForSelectedWeek();
 
       if (!weeklyEntries.length) {
-        alert("Não há registros na semana atual para gerar o PDF.");
+        alert("Não há registros na semana selecionada para gerar o PDF.");
         return;
       }
 
@@ -1031,7 +1142,8 @@
         const margin = 16;
         let y = 20;
 
-        const weekText = weekRangeLabel(new Date());
+        const selectedWeekStartDate = getSelectedWeekStartDate();
+        const weekText = weekRangeLabelFromStart(selectedWeekStartDate);
         const generatedAt = new Date().toLocaleString("pt-BR");
 
         doc.setFillColor(18, 22, 30);
@@ -1060,7 +1172,7 @@
         doc.setTextColor(170, 179, 194);
         doc.setFontSize(10);
         const intro = doc.splitTextToSize(
-          "Documento consolidado com os registros diários da semana. Imagens anexadas e páginas de PDF convertidas aparecem visualmente abaixo de cada relatório.",
+          "Documento consolidado com os registros diários da semana selecionada. Imagens anexadas e páginas de PDF convertidas aparecem visualmente abaixo de cada relatório.",
           pageWidth - margin * 2
         );
         doc.text(intro, margin, 102);
@@ -1188,7 +1300,7 @@
           doc.text(`Página ${doc.getNumberOfPages()}`, pageWidth - 28, pageHeight - 10);
         }
 
-        const filename = `relatorio-semanal-${getLocalISODate()}.pdf`;
+        const filename = `relatorio-semana-${getLocalISODate(selectedWeekStartDate)}.pdf`;
         doc.save(filename);
       } catch (error) {
         console.error(error);
@@ -1204,7 +1316,7 @@
         entries: state.entries
       };
 
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
@@ -1219,7 +1331,7 @@
       if (!file) return;
 
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const parsed = JSON.parse(reader.result);
 
@@ -1231,14 +1343,17 @@
           const ok = confirm("Importar este backup substituirá os dados atuais. Deseja continuar?");
           if (!ok) return;
 
+          setLoading("Importando backup...");
           state.entries = parsed.entries;
-          saveState();
+          await saveState();
           resetForm();
           renderAll();
           alert("Backup importado com sucesso.");
         } catch (error) {
           console.error(error);
           alert("Não foi possível importar o backup.");
+        } finally {
+          setLoading("");
         }
       };
       reader.readAsText(file);
@@ -1256,9 +1371,27 @@
       window.scrollTo({ top: 0, behavior: "smooth" });
     });
 
-    loadState();
-    resetForm();
-    renderAll();
+    prevWeekBtn.addEventListener("click", goToPreviousWeek);
+    currentWeekBtn.addEventListener("click", goToCurrentWeek);
+    nextWeekBtn.addEventListener("click", goToNextWeek);
+
+    async function init() {
+      try {
+        setLoading("Inicializando app...");
+        db = await openDatabase();
+        state.selectedWeekStart = getLocalISODate(getWeekStart(new Date()));
+        await loadState();
+        resetForm();
+        renderAll();
+      } catch (error) {
+        console.error(error);
+        alert("Falha ao iniciar o app.");
+      } finally {
+        setLoading("");
+      }
+    }
+
+    init();
   </script>
 </body>
 </html>
